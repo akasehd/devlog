@@ -5,7 +5,7 @@ date: 2026-11-17
 tags: [nextjs, security, react]
 ---
 
-Auth libraries are a reasonable default, but they make it hard to answer simple questions about your own app: where exactly is the session stored, what happens to it when a password changes, and can a user sign out a lost laptop? When I built [AuthKit](https://github.com/kirisen/authkit) I wrote the session layer by hand so those answers would be a few lines of code each.
+Auth libraries are a reasonable default, but they make it hard to answer simple questions about your own app: where exactly is the session stored, what happens to it when a password changes, and can a user sign out a lost laptop? When I built [AuthKit](https://github.com/akasehd/authkit) I wrote the session layer by hand so those answers would be a few lines of code each.
 
 This post covers the parts that matter most.
 
@@ -97,4 +97,4 @@ Combined with identical error messages and a forgot-password form that responds 
 
 The design assumes one database that every request can reach quickly. That's true for SQLite on a single server and for Postgres anywhere. For an edge deployment you would keep the same table and hashing scheme but put the session store somewhere the edge can reach, such as a hosted SQLite or Redis. The application code above wouldn't change.
 
-The full code and tests are in the [AuthKit repository](https://github.com/kirisen/authkit).
+The full code and tests are in the [AuthKit repository](https://github.com/akasehd/authkit).

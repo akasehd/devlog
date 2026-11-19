@@ -6,7 +6,7 @@ export const site = {
   url: process.env.SITE_URL ?? "http://localhost:3000",
   links: {
     portfolio: "https://www.kirisen.xyz",
-    github: "https://github.com/kirisen",
+    github: "https://github.com/akasehd",
   },
   postsPerPage: 10,
 };

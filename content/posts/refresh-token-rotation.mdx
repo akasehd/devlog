@@ -7,7 +7,7 @@ tags: [security, nodejs, api]
 
 Short-lived access tokens are the easy part of API authentication. The hard part is the refresh token: it lives for weeks, it can mint new access tokens, and if someone steals it they can keep doing that quietly for as long as it is valid.
 
-Rotation is the standard answer. Every time a client uses a refresh token, the server revokes it and hands back a new one. A stolen token then has a short useful life, but only if the server can also tell when something has gone wrong. That second part is where I made a mistake building [PulseAPI](https://github.com/kirisen/pulseapi), and a test caught it before anything shipped.
+Rotation is the standard answer. Every time a client uses a refresh token, the server revokes it and hands back a new one. A stolen token then has a short useful life, but only if the server can also tell when something has gone wrong. That second part is where I made a mistake building [PulseAPI](https://github.com/akasehd/pulseapi), and a test caught it before anything shipped.
 
 ## The model
 
@@ -114,4 +114,4 @@ Now every path through the transaction commits, and the error is raised after th
 - **Keep transactions about data.** Return a result from the transaction and map it to an HTTP response afterwards. Exceptions inside a transaction should mean "something broke, undo everything", not "the user gets a 401".
 - **Rotation without reuse detection is half a feature.** It shortens a stolen token's life, but only reuse detection tells you the theft happened.
 
-The full implementation, with the tests, is in the [PulseAPI repository](https://github.com/kirisen/pulseapi).
+The full implementation, with the tests, is in the [PulseAPI repository](https://github.com/akasehd/pulseapi).

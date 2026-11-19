@@ -12,7 +12,7 @@ It fails in production in two directions:
 - **Orders get lost.** The customer closes the tab during the redirect, their connection drops, or their bank's 3-D Secure page never returns. They were charged, and your database says the order is still pending.
 - **Orders get faked.** Anyone can visit the success URL. If that page trusts the URL, a session id from an unpaid or expired checkout is enough to mark the order paid.
 
-In [ShopFlow](https://github.com/kirisen/shopflow) the success page only **reads** order status. The only thing that changes it is a signed webhook from Stripe.
+In [ShopFlow](https://github.com/akasehd/shopflow) the success page only **reads** order status. The only thing that changes it is a signed webhook from Stripe.
 
 ## The flow
 
@@ -90,4 +90,4 @@ That leaves one narrow race: two people paying for the last unit at the same mom
 A quick review checklist for any payment integration: Does anything other than a verified webhook change order state? What happens when the same event arrives twice? What happens when the handler fails halfway through?
 </Callout>
 
-The full implementation and its tests are in the [ShopFlow repository](https://github.com/kirisen/shopflow).
+The full implementation and its tests are in the [ShopFlow repository](https://github.com/akasehd/shopflow).
