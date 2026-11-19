@@ -1,0 +1,93 @@
+---
+title: Webhook-confirmed orders with Stripe Checkout
+description: Why the success page should never mark an order as paid, and how to make webhook handling safe against duplicates, retries and payments that settle later.
+date: 2026-11-19
+tags: [stripe, nextjs, architecture]
+---
+
+The simplest Stripe Checkout integration is also the most common bug. The customer pays, Stripe redirects to `/success?session_id=...`, and the success page marks the order paid. It works in every demo.
+
+It fails in production in two directions:
+
+- **Orders get lost.** The customer closes the tab during the redirect, their connection drops, or their bank's 3-D Secure page never returns. They were charged, and your database says the order is still pending.
+- **Orders get faked.** Anyone can visit the success URL. If that page trusts the URL, a session id from an unpaid or expired checkout is enough to mark the order paid.
+
+In [ShopFlow](https://github.com/kirisen/shopflow) the success page only **reads** order status. The only thing that changes it is a signed webhook from Stripe.
+
+## The flow
+
+1. `createOrder` turns the cart into a `pending` order and snapshots each item's name and price.
+2. The Checkout Session is built from that snapshot, with the order id in its metadata.
+3. Stripe calls `/api/stripe/webhook` with `checkout.session.completed`.
+4. The handler verifies the signature, then calls `fulfillOrder`, which marks the order paid, takes the stock and empties the cart.
+
+The order page refreshes itself every two seconds while the order is pending. In practice the webhook usually wins the race against the redirect, so customers rarely see the "Confirming your payment" state at all.
+
+## Verify the raw body
+
+Stripe signs the exact bytes it sends. Parse the JSON first and re-serialize it, and the signature no longer matches. In a Next.js route handler, read the body as text:
+
+```ts title="src/app/api/stripe/webhook/route.ts"
+const body = await req.text();
+const event = stripe().webhooks.constructEvent(body, req.headers.get("stripe-signature") ?? "", secret);
+```
+
+## Expect every event more than once
+
+Stripe delivers events at least once. Retries, network blips and replays from the dashboard all produce duplicates. Two defenses work together.
+
+**The fulfilment itself is idempotent.** It only acts on a pending order:
+
+```ts title="src/lib/store.ts"
+const order = getOrder(orderId);
+if (order.status !== "pending") return { fulfilled: false, oversold: [] };
+```
+
+**Each event id is recorded.** A `processed_events` table with the event id as primary key turns "have I seen this?" into one insert:
+
+```ts
+const { changes } = db().prepare("INSERT OR IGNORE INTO processed_events (id, created_at) VALUES (?, ?)").run(eventId, Date.now());
+return changes === 1;
+```
+
+## Claim and apply in one transaction
+
+Here is the trap, and I've written about [a close relative of it before](/posts/refresh-token-rotation). If you record the event id and then fulfilment throws, say because the disk is full, the id stays recorded. Stripe retries, the handler sees a known id, skips it, and the order stays pending forever.
+
+The claim and the work have to commit or roll back together:
+
+```ts title="src/lib/payments.ts" {2}
+export function handleStripeEvent(event: Stripe.Event) {
+  return transaction(db(), () => applyEvent(event)); // claim + fulfil, atomically
+}
+```
+
+`fulfillOrder` opens its own transaction too, so the transaction helper turns nested calls into savepoints. The inner work is still atomic on its own, and it rolls back with the outer transaction if anything later fails:
+
+```ts title="src/lib/db.ts"
+db.exec(level === 0 ? "BEGIN IMMEDIATE" : `SAVEPOINT ${sp}`);
+// ...
+db.exec(level === 0 ? "ROLLBACK" : `ROLLBACK TO ${sp}; RELEASE ${sp}`);
+```
+
+The test for this makes fulfilment fail once, then delivers the same event again and checks that the order ends up paid.
+
+## Payments that settle later
+
+Some payment methods complete the Checkout Session before the money arrives. Bank debits are the usual example. The session's `payment_status` is then `unpaid`, and a later `checkout.session.async_payment_succeeded` event confirms it. Fulfilling on `completed` without checking would ship goods for a payment that might still fail:
+
+```ts
+if (s.payment_status !== "paid") return { handled: true, note: "awaiting async payment" };
+```
+
+## Stock: check early, take late
+
+Stock is checked when the order is created, so nobody pays for something already gone. It's only decremented when payment is confirmed, so abandoned checkouts don't lock up inventory. Pending orders expire with their 30-minute Checkout Session.
+
+That leaves one narrow race: two people paying for the last unit at the same moment. ShopFlow honours both payments and logs the oversell, because refunding someone who was just charged is a worse experience than a short shipping delay. A shop where that's unacceptable can reserve stock when the order is created instead.
+
+<Callout type="tip">
+A quick review checklist for any payment integration: Does anything other than a verified webhook change order state? What happens when the same event arrives twice? What happens when the handler fails halfway through?
+</Callout>
+
+The full implementation and its tests are in the [ShopFlow repository](https://github.com/kirisen/shopflow).
