@@ -1,0 +1,117 @@
+---
+title: Refresh token rotation, and the rollback that undid my theft detection
+description: How rotating refresh tokens with reuse detection works, and a subtle transaction bug that silently disabled the security feature it was meant to provide.
+date: 2026-11-12
+tags: [security, nodejs, api]
+---
+
+Short-lived access tokens are the easy part of API authentication. The hard part is the refresh token: it lives for weeks, it can mint new access tokens, and if someone steals it they can keep doing that quietly for as long as it is valid.
+
+Rotation is the standard answer. Every time a client uses a refresh token, the server revokes it and hands back a new one. A stolen token then has a short useful life, but only if the server can also tell when something has gone wrong. That second part is where I made a mistake building [PulseAPI](https://github.com/kirisen/pulseapi), and a test caught it before anything shipped.
+
+## The model
+
+Each refresh token is a random 256-bit string. The client gets the raw value and the database stores only its SHA-256 hash, so a leaked database can't be replayed:
+
+```js title="src/modules/auth.js"
+const token = randomBytes(32).toString("base64url");
+db.prepare("INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)")
+  .run(userId, sha256(token), expires);
+```
+
+On refresh, there are three cases:
+
+1. **Valid and unused**: revoke it, issue a new pair.
+2. **Unknown or expired**: reject.
+3. **Already revoked**: this one matters.
+
+A revoked token should never come back. The legitimate client threw it away the moment it got a replacement. So if a revoked token shows up, two parties hold copies of the same token, and the server can't know which one is the attacker. The safe response is to revoke every refresh token for that user and force a fresh sign-in everywhere.
+
+## The bug
+
+My first version did the whole check inside a transaction, which seemed obviously right: read the token, decide, write the result, all atomically.
+
+```js {5-7}
+refresh(refreshToken) {
+  return transaction(db, () => {
+    const row = findToken(refreshToken);
+    if (!row || row.revoked_at || row.expires_at <= now()) {
+      // Reuse of a revoked token: revoke the whole family.
+      if (row?.revoked_at) revokeAllFor(row.user_id);
+      throw unauthorized("Refresh token is invalid or expired");
+    }
+    revoke(row.id);
+    return issueTokens(row.user_id);
+  });
+}
+```
+
+Read it again and look at what `transaction` does when its callback throws:
+
+```js
+export function transaction(db, fn) {
+  db.exec("BEGIN");
+  try {
+    const result = fn();
+    db.exec("COMMIT");
+    return result;
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+```
+
+The reuse branch revokes the family and then throws a 401. The throw triggers `ROLLBACK`, and the rollback undoes the revocation. The client gets the right error, the logs look right, and the attacker's token keeps working.
+
+<Callout type="warning">
+Throwing to signal a business outcome inside a transaction couples two unrelated decisions: what the client sees and what the database keeps. Here, the outcome I wanted to keep was the one that gets rolled back.
+</Callout>
+
+The test that caught it does exactly what an attacker would:
+
+```js title="test/auth.test.js"
+const { refreshToken } = await user();
+const first = await api.post("/v1/auth/refresh").send({ refreshToken });
+expect(first.status).toBe(200);
+
+// Replay the original token: rejected, as expected.
+expect((await api.post("/v1/auth/refresh").send({ refreshToken })).status).toBe(401);
+
+// The newest token must now be dead too.
+const after = await api.post("/v1/auth/refresh").send({ refreshToken: first.body.refreshToken });
+expect(after.status).toBe(401); // failed: got 200
+```
+
+The first two assertions passed, which is why the bug is easy to miss by hand. Only the third one, which checks the side effect rather than the response, failed.
+
+## The fix
+
+The transaction should decide and record. Translating that decision into an HTTP error belongs outside it:
+
+```js {2,6,11-12}
+refresh(refreshToken) {
+  const result = transaction(db, () => {
+    const row = findToken(refreshToken);
+    if (!row || row.expires_at <= now()) return { ok: false };
+    if (row.revoked_at) {
+      revokeAllFor(row.user_id); // must commit
+      return { ok: false };
+    }
+    revoke(row.id);
+    return { ok: true, tokens: issueTokens(row.user_id) };
+  });
+  if (!result.ok) throw unauthorized("Refresh token is invalid or expired");
+  return result.tokens;
+}
+```
+
+Now every path through the transaction commits, and the error is raised after the writes are durable.
+
+## Takeaways
+
+- **Test the side effect, not only the status code.** A security feature that returns the right error but doesn't change state is indistinguishable from a working one until someone checks the state.
+- **Keep transactions about data.** Return a result from the transaction and map it to an HTTP response afterwards. Exceptions inside a transaction should mean "something broke, undo everything", not "the user gets a 401".
+- **Rotation without reuse detection is half a feature.** It shortens a stolen token's life, but only reuse detection tells you the theft happened.
+
+The full implementation, with the tests, is in the [PulseAPI repository](https://github.com/kirisen/pulseapi).

@@ -1,0 +1,100 @@
+---
+title: Database sessions in Next.js without an auth library
+description: A walkthrough of the session design behind AuthKit, including why the database stores hashes, where the checks must live, and what the session list on the account page needs.
+date: 2026-11-17
+tags: [nextjs, security, react]
+---
+
+Auth libraries are a reasonable default, but they make it hard to answer simple questions about your own app: where exactly is the session stored, what happens to it when a password changes, and can a user sign out a lost laptop? When I built [AuthKit](https://github.com/kirisen/authkit) I wrote the session layer by hand so those answers would be a few lines of code each.
+
+This post covers the parts that matter most.
+
+## Tokens in the cookie, hashes in the database
+
+A session is created with a random token:
+
+```ts title="src/lib/auth/core.ts"
+export function createSession(userId: string, userAgent = "") {
+  const token = randomToken(); // 32 random bytes, base64url
+  const expiresAt = Date.now() + SESSION_DAYS * DAY;
+  db().prepare(`INSERT INTO sessions (id_hash, user_id, user_agent, created_at, last_seen, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(sha256(token), userId, userAgent.slice(0, 300), Date.now(), Date.now(), expiresAt);
+  return { token, expiresAt };
+}
+```
+
+The browser gets `token` in an `HttpOnly`, `SameSite=Lax` cookie. The database only ever sees `sha256(token)`. If the database leaks through a backup, a log or an injection bug, the attacker gets hashes they can't turn back into cookies. The same pattern applies to email verification and password reset tokens.
+
+A plain SHA-256 is enough here, unlike for passwords, because the input is 256 bits of randomness. There's nothing to brute-force.
+
+## Resolving the session once per request
+
+Server Components, layouts and Server Actions all need the current user. React's `cache` makes sure the lookup runs once per request no matter how many places ask:
+
+```ts title="src/lib/auth/session.ts"
+export const getSession = cache(async () => {
+  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  return token ? validateSession(token) : null;
+});
+
+export async function requireUser() {
+  const user = (await getSession())?.user;
+  if (!user) redirect("/sign-in");
+  return user;
+}
+```
+
+`validateSession` deletes expired rows as it finds them and records `last_seen`, throttled to one write per minute so a busy page doesn't turn every request into a database write.
+
+## Check in the action, not only the page
+
+This is the mistake I see most in Next.js code. A page calls `requireUser()`, so it feels protected. But a Server Action is a public HTTP endpoint. Anyone can call it directly with a crafted request, whether or not they can see the page that renders the form.
+
+```ts title="src/app/actions.ts" {2}
+export async function setRoleAction(form: FormData) {
+  const admin = await requireAdmin(); // the check that actually protects the data
+  const role = form.get("role") === "admin" ? "admin" : "user";
+  core.setRole(admin.id, String(form.get("userId")), role);
+  revalidatePath("/admin");
+}
+```
+
+<Callout type="tip">
+Treat every Server Action like an API route: authenticate, authorize and validate input at the top, every time.
+</Callout>
+
+## Sessions users can see and revoke
+
+Because sessions are rows, the account page can list them with the device and last activity, and revoke any of them:
+
+```ts
+export function revokeOtherSessions(userId: string, keepSessionId: string | null) {
+  db().prepare("DELETE FROM sessions WHERE user_id = ? AND id_hash != ?").run(userId, keepSessionId ?? "");
+}
+```
+
+Two flows call this automatically:
+
+- **Changing a password** keeps the current session and signs out every other device. If the password changed because it leaked, any session the attacker opened is gone.
+- **Resetting a password** signs out everywhere, including the current browser, because the person resetting may not be the person who was signed in.
+
+With a stateless JWT, neither of these is possible without adding a denylist, which is a session table by another name.
+
+## Uniform timing on sign-in
+
+One more detail. If sign-in returns immediately for unknown emails but takes 150 ms to hash for known ones, response time tells an attacker which emails have accounts. AuthKit always runs a hash comparison, against a dummy hash when the user doesn't exist:
+
+```ts
+dummyHash ??= hashPassword(randomToken());
+const ok = await verifyPassword(password, row?.password_hash ?? (await dummyHash));
+return row && row.password_hash && ok ? toUser(row) : null;
+```
+
+Combined with identical error messages and a forgot-password form that responds the same way for every email, the app doesn't reveal who has an account.
+
+## What I'd change for scale
+
+The design assumes one database that every request can reach quickly. That's true for SQLite on a single server and for Postgres anywhere. For an edge deployment you would keep the same table and hashing scheme but put the session store somewhere the edge can reach, such as a hosted SQLite or Redis. The application code above wouldn't change.
+
+The full code and tests are in the [AuthKit repository](https://github.com/kirisen/authkit).

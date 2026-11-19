@@ -1,0 +1,55 @@
+---
+title: Writing posts in DevLog
+description: A reference for the MDX features available in every post, kept as a draft so it only shows up in development.
+date: 2026-11-01
+tags: [meta]
+draft: true
+---
+
+This post is a draft, so it only appears when you run `npm run dev`. Use it as a reference for what posts can contain.
+
+## Frontmatter
+
+```yaml
+---
+title: Required. The post title
+description: Required. One or two sentences, used in lists, RSS and social cards
+date: 2026-11-01
+updated: 2026-11-05   # optional
+tags: [nextjs, security]
+draft: true            # optional, hides the post in production
+---
+```
+
+The filename is the URL: `content/posts/my-post.mdx` becomes `/posts/my-post`.
+
+## Code
+
+Fenced code blocks are highlighted at build time, with a light and a dark theme. Add a title and highlight lines:
+
+```ts title="example.ts" {2}
+export function greet(name: string) {
+  return `Hello, ${name}`;
+}
+```
+
+## Callouts
+
+<Callout type="note">A plain note.</Callout>
+
+<Callout type="tip" title="Shortcut">Run `npm run new "My post title"` to create a post with frontmatter filled in.</Callout>
+
+<Callout type="warning">Something to be careful about.</Callout>
+
+## Tables, task lists and footnotes
+
+| Feature | Supported |
+|---|---|
+| Tables | Yes |
+| Task lists | Yes |
+| Footnotes | Yes[^1] |
+
+- [x] Write the post
+- [ ] Publish it
+
+[^1]: Through GitHub Flavored Markdown.
